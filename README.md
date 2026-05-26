@@ -92,6 +92,32 @@ OpenAPI docs will be available at `/docs` (Swagger UI) and `/redoc`.
 
 ---
 
+## Steps to run as dev
+
+First clone the repo
+```bash
+git clone https://github.com/Vishmayraj/istSOS4-MetadataConnector.git
+cd istSOS4-MetadataConnector
+```
+
+Set up the venv
+```bash
+# For Windows
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+```bash
+# For Linux
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Then run the server at default configurations for a dev environment
+```bash
+# TO BE CONTINUED
+```
+
 ## License
 
 Apache 2.0 - see [LICENSE](LICENSE).
