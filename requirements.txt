@@ -1,0 +1,9 @@
+# istSOS Metadata Connector - runtime dependencies
+#
+# API layer
+fastapi
+uvicorn[standard]
+# HTTP client (harvester + utils)
+aiohttp
+# STAC transformer
+pystac
