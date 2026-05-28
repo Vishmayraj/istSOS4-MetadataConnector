@@ -1,1 +1,1 @@
-# This file is here to define this dir as package
+# istSOS4 Metadata Connector
