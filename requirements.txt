@@ -7,3 +7,6 @@ uvicorn[standard]
 aiohttp
 # STAC transformer
 pystac
+# Configuration Layer
+pydantic>=2.7.0,<3.0.0
+pydantic-settings>=2.3.0,<3.0.0
