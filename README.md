@@ -118,6 +118,59 @@ Then run the server at default configurations for a dev environment
 # TO BE CONTINUED
 ```
 
+---
+
+## Running tests
+
+```bash
+pytest tests/ -v
+```
+
+The test suite covers all mandatory DCAT-AP field mappings, all STAC object types, and edge cases including Things with no Location, Datastreams with no `phenomenonTime`, open-ended temporal intervals, and missing mandatory config.
+
+---
+
+## Project structure
+
+```
+MetadataConnector/
+├── connector/
+│   ├── api.py                  # FastAPI app: STAC + DCAT + utility endpoints
+│   ├── harvester.py            # Paginated aiohttp STA fetch; HarvestedCatalog dataclass
+│   ├── stac_transformer.py     # STA -> pystac objects (Thing -> Collection, Datastream -> Item)
+│   ├── dcat_transformer.py     # STA -> rdflib Graph (DCAT-AP 3.0, JSON-LD + Turtle)
+│   ├── cache.py                # In-memory TTL cache (key-value, monotonic clock)
+│   ├── config.py               # pydantic-settings -> single source of truth for all config
+│   ├── exceptions.py           # HarvesterError hierarchy
+│   └── utils.py                # fetch_with_retry (aiohttp + exponential backoff), build_cache_key
+├── docs/
+│   ├── metadata_connector/
+│   │   ├── Harvesting-Layer-Reference.md      # In-depth docs
+│   │   ├── STA-STAC-Mapping-Reference.md
+│   │   ├── Configuration-Reference.md
+│   │   ├── API-Layer-Reference.md
+│   │   └── STA-DCAT-AP-Mapping-Reference.md
+│   └── mentor_review_docs/
+│       ├── ..
+│       ├── ..
+│       └── Harvester-Design-Summary.md
+├── tests/
+│   ├── conftest.py
+│   ├── test_harvester.py
+│   ├── test_stac_transformer.py
+│   └── test_dcat_transformer.py
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
+├── .gitignore
+├── .env.example
+├── requirements.txt
+└── requirements-test.txt
+```
+
+---
+
+
 ## License
 
 Apache 2.0 - see [LICENSE](LICENSE).
