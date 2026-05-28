@@ -3,14 +3,13 @@ Connector configuration layer.
 
 All settings are loaded from environment variables or a .env file in the
 project root. The Settings class is the single source of truth for every
-configurable value. Import get_settings() everywhere — never read os.environ
-directly.
-
-Variable names match the spec in Harvesting-Layer-Reference.md §11 exactly
-so that .env keys are self-documenting without a translation layer.
+configurable value in the connector -- import get_settings() everywhere
+instead of reading os.environ directly.
 """
 
 from __future__ import annotations
+
+from functools import lru_cache
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -59,3 +58,13 @@ class Settings(BaseSettings):
         default="http://localhost:8020/stac",
         description="Public base URL of the STAC endpoint, used for building self/root/collection links.",
     )
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """
+    Return the singleton Settings instance.
+
+    Cached after first call. Import this everywhere instead of
+    constructing Settings() directly.
+    """
+    return Settings()
