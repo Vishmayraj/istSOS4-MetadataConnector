@@ -150,10 +150,6 @@ MetadataConnector/
 │   │   ├── Configuration-Reference.md
 │   │   ├── API-Layer-Reference.md
 │   │   └── STA-DCAT-AP-Mapping-Reference.md
-│   └── mentor_review_docs/
-│       ├── ..
-│       ├── ..
-│       └── Harvester-Design-Summary.md
 ├── tests/
 │   ├── conftest.py
 │   ├── test_harvester.py
