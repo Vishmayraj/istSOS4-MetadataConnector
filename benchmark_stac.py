@@ -33,6 +33,10 @@ import aiohttp
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    handlers=[
+        logging.FileHandler("benchmark.log", mode="w"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger("benchmark")
 
@@ -589,19 +593,15 @@ def transform_to_stac(
 
 # Main benchmark runner
 async def run(config: BenchmarkConfig) -> None:
-    # Fetch phase
     catalog, fetch_elapsed = await fetch_catalog(config)
     total_datastreams = sum(len(t.datastreams) for t in catalog.things)
 
-    logger.info("\n" + "=" * 60)
     logger.info("FETCH SUMMARY")
-    logger.info("=" * 60)
-    logger.info(f"  STA instance   : {config.sta_base_url}")
-    logger.info(f"  Things         : {catalog.thing_count}")
-    logger.info(f"  Datastreams    : {total_datastreams}")
-    logger.info(f"  Fetch time     : {fetch_elapsed:.3f}s")
+    logger.info("  STA instance   : %s", config.sta_base_url)
+    logger.info("  Things         : %d", catalog.thing_count)
+    logger.info("  Datastreams    : %d", total_datastreams)
+    logger.info("  Fetch time     : %.3fs", fetch_elapsed)
 
-    # Transform phase -- 100 iterations for timing accuracy on small datasets
     ITERATIONS = 1
     logger.info("Running transformation x%d iterations for timing accuracy...", ITERATIONS)
 
@@ -616,19 +616,16 @@ async def run(config: BenchmarkConfig) -> None:
     collections_built = len(catalog.things)
     items_built = total_datastreams - skipped
 
-    logger.info("\n" + "=" * 60)
     logger.info("TRANSFORMATION SUMMARY")
-    logger.info("=" * 60)
-    logger.info(f"  Collections built  : {collections_built}")
-    logger.info(f"  Items built        : {items_built}")
-    logger.info(f"  Items skipped      : {skipped}  (no phenomenonTime)")
-    logger.info(f"  Iterations         : {ITERATIONS}")
-    logger.info(f"  Avg transform time : {avg_ms:.2f}ms")
-    logger.info(f"  Total ({ITERATIONS}x)      : {avg_ms * ITERATIONS:.1f}ms")
+    logger.info("  Collections built  : %d", collections_built)
+    logger.info("  Items built        : %d", items_built)
+    logger.info("  Items skipped      : %d  (no phenomenonTime)", skipped)
+    logger.info("  Iterations         : %d", ITERATIONS)
+    logger.info("  Avg transform time : %.2fms", avg_ms)
+    logger.info("  Total (%dx)        : %.1fms", ITERATIONS, avg_ms * ITERATIONS)
     if items_built > 0:
-        logger.info(f"  Per-item avg       : {(avg_ms / items_built):.4f}ms")
+        logger.info("  Per-item avg       : %.4fms", avg_ms / items_built)
 
-    # Save output -- strip _items from collections before writing
     output = {
         "catalog": stac_dict["catalog"],
         "collections": [
@@ -641,10 +638,8 @@ async def run(config: BenchmarkConfig) -> None:
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, default=str)
 
-    logger.info("\n" + "=" * 60)
-    logger.info(f"  Output saved to    : {output_path}")
-    logger.info(f"  Output size        : {output_path.stat().st_size / 1024:.1f} KB")
-    logger.info("=" * 60 + "\n")
+    logger.info("Output saved to : %s", output_path)
+    logger.info("Output size     : %.1f KB", output_path.stat().st_size / 1024)
 
 
 def main() -> None:
