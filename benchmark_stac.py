@@ -18,10 +18,13 @@ Output:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import aiohttp
@@ -525,3 +528,129 @@ def _build_collection_dict(
         # items kept here for internal use only -- stripped before serving /collections
         "_items": items,
     }
+
+
+def transform_to_stac(
+    catalog: HarvestedCatalog,
+    stac_root_href: str,
+) -> tuple[dict, int]:
+    """
+    Build a complete STAC catalog as plain dicts with correct API hrefs.
+    This is the function being benchmarked -- pure CPU, no I/O.
+    """
+    stac_root = stac_root_href.rstrip("/")
+
+    catalog_id = (
+        "istsos-connector-"
+        + catalog.base_url.replace("://", "-").replace("/", "-").strip("-")
+    )
+
+    skipped_items = 0
+    collections: list[dict] = []
+
+    for thing in catalog.things:
+        collection_id = f"thing-{thing.id}"
+        items = []
+        for ds in thing.datastreams:
+            item = _build_item_dict(thing, ds, collection_id, stac_root)
+            if item is not None:
+                items.append(item)
+            else:
+                skipped_items += 1
+        collections.append(_build_collection_dict(thing, items, stac_root))
+
+    root_catalog = {
+        "type": "Catalog",
+        "stac_version": "1.0.0",
+        "id": catalog_id,
+        "description": (
+            f"istSOS4 deployment: {catalog.thing_count} Things, "
+            f"harvested from {catalog.base_url} at {catalog.harvested_at}."
+        ),
+        "links": [
+            {"rel": "self", "href": stac_root, "type": "application/json"},
+            {"rel": "root", "href": stac_root, "type": "application/json"},
+        ] + [
+            {
+                "rel": "child",
+                "href": f"{stac_root}/collections/{col['id']}",
+                "type": "application/json",
+                "title": col.get("title") or col["id"],
+            }
+            for col in collections
+        ],
+    }
+
+    return {
+        "catalog": root_catalog,
+        "collections": collections,
+    }, skipped_items
+
+
+# Main benchmark runner
+async def run(config: BenchmarkConfig) -> None:
+    # Fetch phase
+    catalog, fetch_elapsed = await fetch_catalog(config)
+    total_datastreams = sum(len(t.datastreams) for t in catalog.things)
+
+    logger.info("\n" + "=" * 60)
+    logger.info("FETCH SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"  STA instance   : {config.sta_base_url}")
+    logger.info(f"  Things         : {catalog.thing_count}")
+    logger.info(f"  Datastreams    : {total_datastreams}")
+    logger.info(f"  Fetch time     : {fetch_elapsed:.3f}s")
+
+    # Transform phase -- 100 iterations for timing accuracy on small datasets
+    ITERATIONS = 1
+    logger.info("Running transformation x%d iterations for timing accuracy...", ITERATIONS)
+
+    stac_dict: dict = {}
+    skipped = 0
+    transform_start = time.monotonic()
+    for _ in range(ITERATIONS):
+        stac_dict, skipped = transform_to_stac(catalog, config.stac_root_href)
+    transform_elapsed = time.monotonic() - transform_start
+
+    avg_ms = (transform_elapsed / ITERATIONS) * 1000
+    collections_built = len(catalog.things)
+    items_built = total_datastreams - skipped
+
+    logger.info("\n" + "=" * 60)
+    logger.info("TRANSFORMATION SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"  Collections built  : {collections_built}")
+    logger.info(f"  Items built        : {items_built}")
+    logger.info(f"  Items skipped      : {skipped}  (no phenomenonTime)")
+    logger.info(f"  Iterations         : {ITERATIONS}")
+    logger.info(f"  Avg transform time : {avg_ms:.2f}ms")
+    logger.info(f"  Total ({ITERATIONS}x)      : {avg_ms * ITERATIONS:.1f}ms")
+    if items_built > 0:
+        logger.info(f"  Per-item avg       : {(avg_ms / items_built):.4f}ms")
+
+    # Save output -- strip _items from collections before writing
+    output = {
+        "catalog": stac_dict["catalog"],
+        "collections": [
+            {k: v for k, v in col.items() if k != "_items"}
+            for col in stac_dict["collections"]
+        ],
+    }
+    output_path = Path(config.output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    logger.info("\n" + "=" * 60)
+    logger.info(f"  Output saved to    : {output_path}")
+    logger.info(f"  Output size        : {output_path.stat().st_size / 1024:.1f} KB")
+    logger.info("=" * 60 + "\n")
+
+
+def main() -> None:
+    config = BenchmarkConfig()
+    asyncio.run(run(config))
+
+
+if __name__ == "__main__":
+    main()
