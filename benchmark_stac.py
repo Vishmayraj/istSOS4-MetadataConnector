@@ -92,3 +92,130 @@ async def _paginate_things(
         logger.info("Fetched page %d -- %d Things so far", page, len(raw_things))
 
     return raw_things
+
+
+def _parse_uom(raw: dict) -> dict:
+    return {
+        "name": raw.get("name"),
+        "symbol": raw.get("symbol"),
+        "definition": raw.get("definition"),
+    }
+
+
+def _parse_observed_property(raw: dict) -> Optional[dict]:
+    if not raw.get("@iot.id"):
+        return None
+    return {
+        "id": raw["@iot.id"],
+        "self_link": raw.get("@iot.selfLink", ""),
+        "name": raw.get("name", ""),
+        "description": raw.get("description"),
+        "definition": raw.get("definition"),
+        "properties": raw.get("properties") or None,
+    }
+
+
+def _parse_sensor(raw: dict) -> Optional[dict]:
+    if not raw.get("@iot.id"):
+        return None
+    return {
+        "id": raw["@iot.id"],
+        "self_link": raw.get("@iot.selfLink", ""),
+        "name": raw.get("name", ""),
+        "description": raw.get("description"),
+        "encoding_type": raw.get("encodingType", ""),
+        "metadata": raw.get("metadata"),
+        "properties": raw.get("properties") or None,
+    }
+
+
+def _parse_datastream(raw: dict, thing_id: int) -> Optional[dict]:
+    ds_id = raw.get("@iot.id")
+    if ds_id is None:
+        return None
+    uom_raw = raw.get("unitOfMeasurement")
+    return {
+        "id": ds_id,
+        "self_link": raw.get("@iot.selfLink", ""),
+        "name": raw.get("name", ""),
+        "description": raw.get("description"),
+        "phenomenon_time": raw.get("phenomenonTime"),
+        "result_time": raw.get("resultTime"),
+        "observed_area": raw.get("observedArea"),
+        "observation_type": raw.get("observationType"),
+        "unit_of_measurement": _parse_uom(uom_raw) if uom_raw else None,
+        "properties": raw.get("properties") or None,
+        "observed_property": _parse_observed_property(raw["ObservedProperty"])
+            if raw.get("ObservedProperty") else None,
+        "sensor": _parse_sensor(raw["Sensor"])
+            if raw.get("Sensor") else None,
+    }
+
+
+def _parse_location(raw: dict) -> Optional[dict]:
+    if not raw.get("@iot.id"):
+        return None
+    return {
+        "id": raw["@iot.id"],
+        "name": raw.get("name", ""),
+        "geometry": raw.get("location"),
+    }
+
+
+def _parse_thing(raw: dict) -> Optional[HarvestedThing]:
+    thing_id = raw.get("@iot.id")
+    if thing_id is None:
+        return None
+
+    locations = [
+        loc for r in raw.get("Locations", [])
+        if (loc := _parse_location(r)) is not None
+    ]
+    datastreams = [
+        ds for r in raw.get("Datastreams", [])
+        if (ds := _parse_datastream(r, thing_id)) is not None
+    ]
+
+    return HarvestedThing(
+        id=thing_id,
+        self_link=raw.get("@iot.selfLink", ""),
+        name=raw.get("name", ""),
+        description=raw.get("description"),
+        properties=raw.get("properties") or None,
+        locations=locations,
+        datastreams=datastreams,
+    )
+
+
+async def fetch_catalog(config: BenchmarkConfig) -> tuple[HarvestedCatalog, float]:
+    """Fetch raw STA metadata and normalise into HarvestedCatalog."""
+    timeout = aiohttp.ClientTimeout(total=config.timeout_seconds)
+    expand = "Locations,Datastreams($expand=ObservedProperty,Sensor)"
+    initial_url = (
+        f"{config.sta_base_url}/Things"
+        f"?$expand={expand}&$top={config.page_size}"
+    )
+
+    logger.info("Fetching from %s", config.sta_base_url)
+    fetch_start = time.monotonic()
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        raw_things = await _paginate_things(session, initial_url)
+
+    fetch_elapsed = time.monotonic() - fetch_start
+
+    things = [t for r in raw_things if (t := _parse_thing(r)) is not None]
+    total_ds = sum(len(t.datastreams) for t in things)
+    logger.info(
+        "Fetch complete: %d Things, %d Datastreams, fetch_time=%.3fs",
+        len(things), total_ds, fetch_elapsed,
+    )
+
+    catalog = HarvestedCatalog(
+        base_url=config.sta_base_url,
+        conformance=[],
+        things=things,
+        harvested_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    return catalog, fetch_elapsed
+
