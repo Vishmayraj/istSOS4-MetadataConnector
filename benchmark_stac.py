@@ -292,3 +292,236 @@ def _resolve_item_geometry(
         if geom is not None:
             return geom, _bbox_from_geometry(geom)
     return None, None
+
+
+def _extract_collection_keywords(thing: HarvestedThing) -> list[str]:
+    seen: set[str] = set()
+    keywords: list[str] = []
+
+    def _add(kw: str) -> None:
+        kw = kw.strip()
+        if kw and kw not in seen:
+            seen.add(kw)
+            keywords.append(kw)
+
+    _add(thing.name)
+    for ds in thing.datastreams:
+        op = ds.get("observed_property")
+        if op and op.get("name"):
+            for part in op["name"].split(":"):
+                _add(part)
+        for kw in (ds.get("properties") or {}).get("keywords", []):
+            if isinstance(kw, str):
+                _add(kw)
+    return keywords
+
+
+def _compose_item_description(ds: dict, thing: HarvestedThing) -> str:
+    parts = []
+    if ds.get("description"):
+        parts.append(ds["description"])
+    op = ds.get("observed_property")
+    if op and op.get("description"):
+        parts.append(op["description"])
+    sensor = ds.get("sensor")
+    if sensor and sensor.get("description"):
+        parts.append(sensor["description"])
+    return " | ".join(p for p in parts if p) or ds.get("name", "")
+
+
+def _build_item_dict(
+    thing: HarvestedThing,
+    ds: dict,
+    collection_id: str,
+    stac_root: str,
+) -> Optional[dict]:
+    """Build a STAC Item as a plain dict with API hrefs."""
+    pt = ds.get("phenomenon_time")
+    if not pt:
+        logger.warning("Skipping datastream %s -- no phenomenonTime", ds.get("id"))
+        return None
+
+    start, end = _parse_phenomenon_time(pt)
+    if start is None:
+        logger.warning("Skipping datastream %s -- unparseable phenomenonTime", ds.get("id"))
+        return None
+
+    item_datetime = end if end is not None else start
+    geometry, bbox = _resolve_item_geometry(thing, ds)
+    item_id = f"datastream-{ds['id']}"
+    item_href = f"{stac_root}/collections/{collection_id}/items/{item_id}"
+    collection_href = f"{stac_root}/collections/{collection_id}"
+
+    properties: dict = {
+        "datetime": item_datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "title": f"{thing.name} - {ds.get('name', '')}",
+        "description": _compose_item_description(ds, thing),
+        "start_datetime": start.isoformat(),
+        "end_datetime": end.isoformat() if end is not None else None,
+        "thing_id": thing.id,
+        "thing_name": thing.name,
+        "datastream_id": ds.get("id"),
+    }
+
+    uom = ds.get("unit_of_measurement")
+    if uom:
+        properties["unit_of_measurement"] = uom
+
+    obs_type = ds.get("observation_type")
+    if obs_type:
+        properties["observation_type"] = obs_type
+
+    op = ds.get("observed_property")
+    if op:
+        if op.get("name"):
+            properties["observed_property"] = op["name"]
+        if op.get("id") is not None:
+            properties["observed_property_id"] = op["id"]
+        if op.get("definition") is not None:
+            properties["observed_property_definition"] = op["definition"]
+
+    sensor = ds.get("sensor")
+    if sensor:
+        if sensor.get("name"):
+            properties["sensor_name"] = sensor["name"]
+        if sensor.get("id") is not None:
+            properties["sensor_id"] = sensor["id"]
+        if sensor.get("metadata") is not None:
+            properties["sensor_metadata"] = sensor["metadata"]
+
+    _RESERVED = frozenset({
+        "observedArea", "phenomenonTime", "resultTime",
+        "created", "updated", "platform", "resolution",
+        "instruments", "keywords", "license", "providers",
+    })
+    for k, v in (ds.get("properties") or {}).items():
+        if k not in _RESERVED and k not in properties:
+            properties[k] = v
+
+    base_href = ds.get("self_link", "")
+    ds_name = ds.get("name", "")
+    assets = {
+        "observations_json": {
+            "href": f"{base_href}/Observations" if base_href else "",
+            "type": "application/json",
+            "title": f"{ds_name} -- JSON observations feed",
+            "roles": ["data"],
+        },
+        "observations_csv": {
+            "href": f"{base_href}/Observations?$resultFormat=CSV" if base_href else "",
+            "type": "text/csv",
+            "title": f"{ds_name} -- CSV export",
+            "roles": ["data"],
+        },
+        "datastream": {
+            "href": base_href,
+            "type": "application/json",
+            "title": f"STA Datastream: {ds_name}",
+            "roles": ["metadata"],
+        },
+    }
+
+    links = [
+        {"rel": "self", "href": item_href, "type": "application/geo+json"},
+        {"rel": "root", "href": stac_root, "type": "application/json"},
+        {"rel": "parent", "href": collection_href, "type": "application/json"},
+        {"rel": "collection", "href": collection_href, "type": "application/json", "title": thing.name},
+    ]
+    if base_href:
+        links.append({"rel": "sta_datastream", "href": base_href, "type": "application/json"})
+
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "stac_extensions": [],
+        "id": item_id,
+        "geometry": geometry,
+        "bbox": bbox,
+        "properties": properties,
+        "links": links,
+        "assets": assets,
+        "collection": collection_id,
+    }
+
+
+def _build_collection_dict(
+    thing: HarvestedThing,
+    items: list[dict],
+    stac_root: str,
+) -> dict:
+    """Build a STAC Collection as a plain dict with API hrefs."""
+    collection_id = f"thing-{thing.id}"
+    collection_href = f"{stac_root}/collections/{collection_id}"
+    items_href = f"{stac_root}/collections/{collection_id}/items"
+
+    # Spatial extent
+    bboxes = [item["bbox"] for item in items if item.get("bbox") is not None]
+    if not bboxes:
+        for loc in thing.locations:
+            geom = loc.get("geometry")
+            if geom:
+                bbox = _bbox_from_geometry(geom)
+                if bbox:
+                    bboxes.append(bbox)
+    spatial_bbox = _union_bboxes(bboxes) if bboxes else [-180.0, -90.0, 180.0, 90.0]
+
+    # Temporal extent
+    starts, ends = [], []
+    for item in items:
+        s = item["properties"].get("start_datetime")
+        e = item["properties"].get("end_datetime")
+        if s:
+            dt = _parse_iso(s)
+            if dt:
+                starts.append(dt)
+        ends.append(_parse_iso(e) if e else None)
+
+    collection_start = min(starts).isoformat() if starts else None
+    collection_end = (
+        max(e for e in ends if e is not None).isoformat()
+        if ends and all(e is not None for e in ends)
+        else None
+    )
+
+    # Summaries
+    keywords = _extract_collection_keywords(thing)
+    op_defs, unit_symbols = [], []
+    for ds in thing.datastreams:
+        op = ds.get("observed_property")
+        if op and op.get("definition") is not None:
+            op_defs.append(str(op["definition"]))
+        uom = ds.get("unit_of_measurement")
+        if uom and uom.get("symbol"):
+            unit_symbols.append(uom["symbol"])
+
+    links = [
+        {"rel": "self", "href": collection_href, "type": "application/json"},
+        {"rel": "root", "href": stac_root, "type": "application/json"},
+        {"rel": "parent", "href": stac_root, "type": "application/json"},
+        {"rel": "items", "href": items_href, "type": "application/geo+json"},
+    ]
+    if thing.self_link:
+        links.append({"rel": "sta_thing", "href": thing.self_link, "type": "application/json"})
+
+    return {
+        "type": "Collection",
+        "stac_version": "1.0.0",
+        "id": collection_id,
+        "title": thing.name or None,
+        "description": thing.description or f"STAC Collection for SensorThings Thing: {thing.name}",
+        "keywords": keywords,
+        "extent": {
+            "spatial": {"bbox": [spatial_bbox]},
+            "temporal": {"interval": [[collection_start, collection_end]]},
+        },
+        "links": links,
+        "license": "other",
+        "thing_id": thing.id,
+        "thing_properties": thing.properties,
+        "summaries": {
+            "observed_property_definitions": list(dict.fromkeys(op_defs)),
+            "unit_symbols": list(dict.fromkeys(unit_symbols)),
+        },
+        # items kept here for internal use only -- stripped before serving /collections
+        "_items": items,
+    }
