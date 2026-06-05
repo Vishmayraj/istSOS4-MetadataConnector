@@ -66,3 +66,29 @@ class HarvestedCatalog:
 
     def __post_init__(self) -> None:
         self.thing_count = len(self.things)
+
+
+# Fetch helpers -> basic utility functions
+async def _fetch_json(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
+    async with session.get(url) as resp:
+        resp.raise_for_status()
+        return await resp.json(content_type=None)
+
+
+async def _paginate_things(
+    session: aiohttp.ClientSession,
+    initial_url: str,
+) -> list[dict]:
+    raw_things: list[dict] = []
+    url: Optional[str] = initial_url
+    page = 0
+
+    while url:
+        payload = await _fetch_json(session, url)
+        items = payload.get("value", [])
+        raw_things.extend(items)
+        page += 1
+        url = payload.get("@iot.nextLink") or None
+        logger.info("Fetched page %d -- %d Things so far", page, len(raw_things))
+
+    return raw_things
