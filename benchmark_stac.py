@@ -219,3 +219,76 @@ async def fetch_catalog(config: BenchmarkConfig) -> tuple[HarvestedCatalog, floa
     )
     return catalog, fetch_elapsed
 
+
+# STAC transformer -> will be part of stac_transformer.py
+
+# All links are built manually using the stac_root_href so they point at
+# real API endpoints instead of static .json file paths.
+def _parse_iso(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_phenomenon_time(pt: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    parts = pt.split("/", 1)
+    start = _parse_iso(parts[0].strip())
+    end_str = parts[1].strip() if len(parts) > 1 else ""
+    end = _parse_iso(end_str) if end_str and end_str != ".." else None
+    return start, end
+
+
+def _extract_all_coordinates(geometry: dict) -> list[list[float]]:
+    geom_type = geometry.get("type", "")
+    coords = geometry.get("coordinates")
+    if geom_type == "Point" and coords:
+        return [coords[:2]]
+    if geom_type in ("MultiPoint", "LineString") and coords:
+        return [c[:2] for c in coords]
+    if geom_type == "Polygon" and coords:
+        return [c[:2] for c in coords[0]]
+    if geom_type == "MultiPolygon" and coords:
+        result: list[list[float]] = []
+        for polygon in coords:
+            result.extend(c[:2] for c in polygon[0])
+        return result
+    if geom_type == "GeometryCollection":
+        result = []
+        for geom in geometry.get("geometries", []):
+            result.extend(_extract_all_coordinates(geom))
+        return result
+    return []
+
+
+def _bbox_from_geometry(geometry: Optional[dict]) -> Optional[list[float]]:
+    if geometry is None:
+        return None
+    coords = _extract_all_coordinates(geometry)
+    if not coords:
+        return None
+    lons = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    return [min(lons), min(lats), max(lons), max(lats)]
+
+
+def _union_bboxes(bboxes: list[list[float]]) -> list[float]:
+    return [
+        min(b[0] for b in bboxes), min(b[1] for b in bboxes),
+        max(b[2] for b in bboxes), max(b[3] for b in bboxes),
+    ]
+
+
+def _resolve_item_geometry(
+    thing: HarvestedThing, ds: dict
+) -> tuple[Optional[dict], Optional[list[float]]]:
+    observed_area = ds.get("observed_area")
+    if observed_area is not None:
+        return observed_area, _bbox_from_geometry(observed_area)
+    if thing.locations:
+        geom = thing.locations[0].get("geometry")
+        if geom is not None:
+            return geom, _bbox_from_geometry(geom)
+    return None, None
