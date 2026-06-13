@@ -42,7 +42,9 @@ pystac.Catalog      (1, root, from STA service root)
 | HistoricalLocation | not mapped | | Temporal data comes from `Datastream.phenomenonTime` |
 | FeatureOfInterest | not mapped | | Per-observation spatial, not needed at catalog level |
 
-**stac:Catalog field mapping** (`GET {STA_BASE_URL}/` -> serverSettings.conformance; all identity fields from external config)
+**stac:Catalog field mapping** (all identity fields from external config; `thing_count` from `len(catalog.things)`)
+
+Note: the harvester reads Postgres directly via a single JOIN query. There is no HTTP GET to the STA API. All STA entity data arrives as fields on `HarvestedThing` / `HarvestedCatalog` dataclass instances.
 
 Mandatory:
 
@@ -68,7 +70,7 @@ Optional:
 |---|---|---|
 | `keywords` | Union of `ObservedProperty.name` and `Thing.name` across catalog | Deduplicated union. Added via `extra_fields` |
 
-**stac:Collection field mapping** (`GET {STA_BASE_URL}/Things?$expand=Locations,Datastreams(...)` -- one Collection per Thing)
+**stac:Collection field mapping** (`catalog.things[]` -- one Collection per `HarvestedThing`)
 
 Mandatory:
 
@@ -80,7 +82,7 @@ Mandatory:
 | `description` | `Thing.description` | `thing.description or f"STAC Collection for SensorThings Thing: {thing.name}"` | Fallback composes Thing name into a minimal description |
 | `extent.spatial` | Derived from Datastream `observedArea` bboxes | `pystac.SpatialExtent(bboxes=[computed_bbox])` | If can't find any bboxes, set it to world bbox [-180.0, -90.0, 180.0, 90.0] |
 | `extent.temporal` | Derived from `Datastream.phenomenonTime` across member Items | `pystac.TemporalExtent(intervals=[[start_dt, end_dt]])` | `end_dt` is `None` for live / open-ended deployments |
-| `links` | Derived by pystac + manual | `catalog.add_child(collection)` + manual `sta_thing` link | pystac generates `self`, `root`, `parent`, `items` automatically. One `sta_thing` link added per Collection pointing to `Thing.self_link` |
+| `links` | Derived by pystac + manual | `catalog.add_child(collection)` + manual `sta_thing` link | pystac generates `self`, `root`, `parent`, `items` automatically. One `sta_thing` link added per Collection pointing to the constructed STA URI: `f"{base_url}/v1.1/Things({thing.id})"` |
 
 Recommended:
 
@@ -100,7 +102,7 @@ Optional:
 | `providers` | NONE | External config. List of provider objects. Added via `extra_fields` |
 | `stac_extensions` | NONE | Declare STAC extensions applied to Items in this Collection. Added via `extra_fields` |
 
-**stac:Item field mapping** (`Thing.Datastreams[]` in expanded response -- one Item per Datastream)
+**stac:Item field mapping** (`thing.datastreams[]` -- one Item per Datastream dict in `HarvestedThing`)
 
 Skip condition: if `Datastream.phenomenonTime` is absent or null and `datetime` cannot be constructed, the Item is skipped entirely (WARNING logged). This is the only entity-level skip in the STAC transformer. Null geometry is tolerated; null `datetime` with no `start_datetime` + `end_datetime` fallback is invalid STAC and forces a skip.
 
@@ -114,7 +116,7 @@ Mandatory:
 | `geometry` | `Datastream.observedArea` | `pystac.Item(geometry=ds["observed_area"])` | Fallback: first `Thing.Location.geometry`. `None` if neither -- Item still emitted with `null` geometry |
 | `bbox` | Derived from geometry | `pystac.Item(bbox=_bbox_from_geometry(geometry))` | `[minx, miny, maxx, maxy]`. `None` if geometry is `None` |
 | `datetime` | `Datastream.phenomenonTime` end | `pystac.Item(datetime=_compute_item_datetime(ds))` | Set to `phenomenonTime` end for closed streams. Set to `phenomenonTime` start for open/live streams. Skip Item if both absent |
-| `links` | Derived by pystac + manual | `collection.add_item(item)` + manual `sta_datastream` link | pystac generates `self`, `root`, `parent`, `collection` automatically. One `sta_datastream` link added per Item pointing to `Datastream.self_link` |
+| `links` | Derived by pystac + manual | `collection.add_item(item)` + manual `sta_datastream` link | pystac generates `self`, `root`, `parent`, `collection` automatically. One `sta_datastream` link added per Item pointing to the constructed STA URI: `f"{base_url}/v1.1/Datastreams({ds['id']})"` |
 | `assets` | Constructed | `pystac.Asset(href=..., media_type=..., title=..., roles=[...])`; attached via item.add_asset(key, asset) | Minimum 2 Assets required. pystac does not emit `assets` key if dict is empty, which fails STAC validation |
 | `properties` | See Recommended below | `pystac.Item(properties={})` then `_populate_item_properties(item, thing, ds)` | Plain Python dict. All properties fields below written directly to `item.properties` |
 
@@ -149,7 +151,7 @@ Optional (properties fields, selected):
 | `resolution` | `Datastream.properties["resolution"]` | ISO 8601 duration, e.g. `"PT10M"`. From dummy data |
 | Any extra key | `Datastream.properties[key]` | Pass through non-reserved keys. Do not pass through `observedArea`, `phenomenonTime`, `@iot.*` |
 
-**stac:Asset field mapping** (constructed from `Datastream.self_link`)
+**stac:Asset field mapping** (constructed from `ds["id"]` -- Asset hrefs are built as `f"{base_url}/v1.1/Datastreams({ds['id']})/Observations"` etc.)
 
 | Asset key | href | media_type | roles | Consumer |
 |---|---|---|---|---|
@@ -198,7 +200,6 @@ Temporal (Collection extent):
 
 **Public interface:**
 ```python
-def build_stac_catalog(catalog: HarvestedCatalog, config: Settings) -> dict: ...
-def get_collection_dicts(catalog: HarvestedCatalog, config: Settings) -> list[dict]: ...
+def transform_to_stac(catalog: HarvestedCatalog) -> dict: ...
 ```
-`build_stac_catalog()` constructs the full pystac tree, calls `normalize_hrefs`, serializes to dict, and returns the root Catalog dict. Raises `ValueError` if `STAC_ROOT_HREF` is empty. `get_collection_dicts()` returns one `Collection.to_dict()` per Thing, used by the `/stac/collections` endpoint. Neither function touches the cache or HTTP layer.
+`transform_to_stac()` constructs the full pystac tree, calls `normalize_hrefs`, serializes to dict, and returns a dict with keys `catalog` and `collections`. The `catalog` key holds the root Catalog dict; the `collections` key holds one `Collection.to_dict()` per Thing. `cache.py` calls this function directly; `api.py` reads from cache and serves the appropriate sub-key per endpoint. Raises `ValueError` if `STAC_ROOT_HREF` is unset. Does not touch Postgres, Redis, or the STA HTTP API.
